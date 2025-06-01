@@ -25,4 +25,4 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/misswird/vle-ws-tls:latest
+          tags: ghcr.io/misswird/vl-w-t:latest
