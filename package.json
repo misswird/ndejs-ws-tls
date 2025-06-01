@@ -1,0 +1,26 @@
+{
+  "name": "jsray1.0",
+  "version": "1.0.0",
+  "description": "jsray1.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "W",
+  "license": "MIT",
+  "dependencies": {
+    "cookie-parser": "^1.4.6",
+    "debug": "^4.3.1",
+    "express": "^4.17.1",
+    "express-ws": "^5.0.0",
+    "ws": "^8.13.0",
+    "http-errors": "^1.7.3",
+    "http-proxy": "^1.18.1",
+    "morgan": "^1.10.0",
+    "pug": "^3.0.2",
+    "uuid": "^8.3.2",
+    "bufferutil": "^4.0.1",
+     "request": "^2.88.2", 
+    "utf-8-validate": "^5.0.2"
+  }
+}
