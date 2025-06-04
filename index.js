@@ -5,19 +5,20 @@ const request = require('request');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { WebSocket, createWebSocketStream } = require('ws');
+const { WebSocket } = require('ws');
 
+// 日志函数
 const log = (...args) => console.log(...args);
 const errorLog = (...args) => console.error(...args);
 
-// 环境变量配置
+// 环境变量
 const uuid = (process.env.UUID || 'd342d11e-d424-4583-b36e-524ab1f0afa4').replace(/-/g, '');
 const port = process.env.PORT || 7860;
 const nezhaKey = process.env.NEZHA_KEY;
 const nezhaServer = process.env.NEZHA_SERVER;
 const argoKey = process.env.TOK;
 
-// 下载 nezha 探针
+// 下载哪吒探针二进制文件
 if (nezhaKey) {
   function downloadNezha(callback) {
     const fileName = 'nezha.js';
@@ -29,7 +30,12 @@ if (nezhaKey) {
     request(url)
       .pipe(fileStream)
       .on('error', (err) => callback(`下载nezha文件失败: ${err.message}`))
-      .on('close', () => callback(null));
+      .on('close', () => {
+        fs.chmod(fileName, 0o755, (err) => {
+          if (err) callback(`设置nezha权限失败: ${err.message}`);
+          else callback(null);
+        });
+      });
   }
 
   downloadNezha((err) => {
@@ -38,19 +44,19 @@ if (nezhaKey) {
   });
 
   function keepNezhaAlive() {
-    exec('pgrep -f nezha.js', (err, stdout) => {
+    exec('pidof nezha.js', (err, stdout) => {
       if (!stdout) {
-        exec(`nohup node nezha.js -s ${nezhaServer}:443 -p ${nezhaKey} --tls >/dev/null 2>&1 &`, (err) => {
+        exec(`nohup ./nezha.js -s ${nezhaServer}:443 -p ${nezhaKey} --tls >/dev/null 2>&1 &`, (err) => {
           if (err) log('启动nezha失败');
           else log('启动nezha成功');
         });
       }
     });
   }
-  setInterval(keepNezhaAlive, 20 * 1000);
+  setInterval(keepNezhaAlive, 20000);
 }
 
-// 下载 cloudflared (Argo)
+// 下载 cloudflared
 if (argoKey) {
   function downloadArgo(callback) {
     const fileName = 'cff.js';
@@ -61,92 +67,95 @@ if (argoKey) {
     const fileStream = fs.createWriteStream(fileName);
     request(url)
       .pipe(fileStream)
-      .on('error', (err) => callback(`下载cloudflared失败: ${err.message}`))
-      .on('close', () => callback(null));
+      .on('error', () => callback('下载argo文件失败'))
+      .on('close', () => {
+        fs.chmod(fileName, 0o755, (err) => {
+          if (err) callback('设置argo权限失败');
+          else callback(null);
+        });
+      });
   }
 
   downloadArgo((err) => {
     if (err) log(err);
-    else log('cloudflared文件下载成功');
+    else log('argo文件下载成功');
   });
 
   function keepArgoAlive() {
-    exec('pgrep -f cff.js', (err, stdout) => {
+    exec('pidof cff.js', (err, stdout) => {
       if (!stdout) {
         exec(`nohup ./cff.js tunnel --edge-ip-version auto run --token ${argoKey} >/dev/null 2>&1 &`, (err) => {
-          if (err) log('启动cloudflared失败');
-          else log('启动cloudflared成功');
+          if (err) log('启动argo失败');
+          else log('启动argo成功');
         });
       }
     });
   }
-  setInterval(keepArgoAlive, 20 * 1000);
+  setInterval(keepArgoAlive, 20000);
 }
 
-// 创建 HTTP 服务器
+// 启动 HTTP 服务
 const server = http.createServer((req, res) => {
   res.writeHead(200, {'Content-Type': 'text/plain'});
   res.end('Hello World\n');
 });
-server.listen(port, () => log(`HTTP服务器已监听端口 ${port}`));
+server.listen(port, () => log(`服务启动于端口 ${port}`));
 
-// 初始化 WebSocket 服务器
-const wss = new WebSocket.Server({ server }, () => log('WebSocket Server started'));
+// WebSocket 服务器
+const wss = new WebSocket.Server({ server }, log('WebSocket服务器已启动'));
 
-// 处理 WS 连接
+// WebSocket 连接池
+const connectionPool = new Map();
+
+// WebSocket 数据处理
 wss.on('connection', (ws) => {
   ws.once('message', (data) => {
     const msg = new Uint8Array(data);
-
     const cmd = msg[0];
     const uuidBytes = msg.slice(1, 17);
     const uuidStr = Array.from(uuidBytes).map(b => b.toString(16).padStart(2, '0')).join('');
 
-    // UUID 验证
-    if (uuid.length !== 32 || uuidStr !== uuid) {
+    if (!uuidBytes.every((b, i) => b === parseInt(uuid.substr(i * 2, 2), 16))) {
       ws.close();
       return;
     }
 
-    let pos = 17;
-    const portNum = (msg[pos++] << 8) + msg[pos++];  // 两字节端口
-
+    let pos = 18;
+    const portNum = msg[pos++] + 0x13;
     const ipType = msg[pos++];
     let targetIP = '';
 
-    if (ipType === 1) { // IPv4
+    if (ipType === 1) {
       targetIP = Array.from(msg.slice(pos, pos + 4)).join('.');
       pos += 4;
-    } else if (ipType === 2) { // 域名
+    } else if (ipType === 2) {
       const domainLen = msg[pos++];
       targetIP = new TextDecoder().decode(msg.slice(pos, pos + domainLen));
       pos += domainLen;
-    } else if (ipType === 3) { // IPv6
-      targetIP = Array.from({ length: 8 }, (_, i) =>
-        ((msg[pos + i * 2] << 8) | msg[pos + i * 2 + 1]).toString(16)
-      ).join(':');
+    } else if (ipType === 3) {
+      targetIP = Array.from(msg.slice(pos, pos + 16)).map((v, i) => i % 2 ? v.toString(16).padStart(2, '0') : '').join(':');
       pos += 16;
     }
 
-    log('连接请求:', targetIP, portNum, 'CMD:', cmd);
+    log('连接目标:', targetIP, portNum, '命令:', cmd);
 
-    const tcpConn = net.connect({ host: targetIP, port: portNum }, () => {
-      log('TCP连接已建立:', targetIP, portNum);
-    });
+    let tcpConn = connectionPool.get(targetIP + ':' + portNum);
+    if (!tcpConn) {
+      tcpConn = net.connect({ host: targetIP, port: portNum });
+      connectionPool.set(targetIP + ':' + portNum, tcpConn);
 
-    tcpConn.on('data', (chunk) => {
-      ws.send(chunk);
-    });
-
-    tcpConn.on('error', (err) => {
-      log(`TCP错误(${targetIP}:${portNum}):`, err.message);
-      ws.close();
-    });
-
-    tcpConn.on('close', () => {
-      log('TCP连接关闭:', targetIP, portNum);
-      ws.close();
-    });
+      tcpConn.on('error', () => {
+        log('连接失败:', targetIP, portNum);
+        connectionPool.delete(targetIP + ':' + portNum);
+      });
+      tcpConn.on('close', () => {
+        log('目标连接关闭:', targetIP, portNum);
+        connectionPool.delete(targetIP + ':' + portNum);
+      });
+      tcpConn.on('data', (chunk) => {
+        ws.send(chunk);
+      });
+    }
 
     ws.on('message', (data) => {
       tcpConn.write(data);
@@ -156,9 +165,4 @@ wss.on('connection', (ws) => {
       tcpConn.end();
     });
   });
-});
-
-// 捕获未处理异常
-process.on('uncaughtException', (err) => {
-  errorLog('未捕获异常:', err);
 });
